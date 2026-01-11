@@ -1,4 +1,4 @@
-name: Build LWJGL3 Android Full Modules
+name: Build LWJGL3 Android Full Modules (Fixed Paths)
 
 on:
   workflow_dispatch:
@@ -38,6 +38,13 @@ jobs:
           LWJGL_NATIVE=bin/libs/native/linux/$LWJGL_BUILD_ARCH/org/lwjgl
           mkdir -p $LWJGL_NATIVE
 
+          # --- 核心修复 1: 补全所有模块的路径，防止 kotlinc 报错 ---
+          # 哪怕文件夹是空的，只要路径存在，kotlinc 就不会报错中断
+          echo "正在补全模块路径结构..."
+          for dir in modules/lwjgl/*/ ; do
+              mkdir -p "${dir}src/templates/kotlin"
+          done
+
           # 2. 编译 libffi (核心依赖)
           if [ ! -d libffi ]; then
             wget https://github.com/libffi/libffi/releases/download/v$LIBFFI_VERSION/libffi-$LIBFFI_VERSION.tar.gz
@@ -52,21 +59,13 @@ jobs:
           cd ..
           cp libffi/$LIBFFI_A $LWJGL_NATIVE/
 
-          # 3. 下载预编译的 Android 依赖 (OpenAL & Shaderc)
-          # 这些是安卓上常用的第三方库，手动编译极难，通常直接使用 Pojav 提供的预编译版
-          POJAV_NATIVES="https://github.com/AngelAuraMC/Amethyst-Android/raw/v3_openjdk/app_pojavlauncher/src/main/jniLibs/$NDK_ABI"
-          mkdir -p $LWJGL_NATIVE/openal $LWJGL_NATIVE/shaderc
-          wget -nc $POJAV_NATIVES/libopenal.so -O $LWJGL_NATIVE/openal/libopenal.so
-          wget -nc "https://github.com/AngelAuraMC/shaderc/releases/latest/download/libshaderc-$NDK_ABI.zip"
-          unzip -o libshaderc-$NDK_ABI.zip -d $LWJGL_NATIVE/shaderc/
-
-          # 4. 准备编译参数 (修复 Clang 18 语法报错)
-          # 注入 -DLWJGL_ANDROID 确保源码内部逻辑切换到安卓模式
+          # 3. 准备编译参数 (修复 Clang 18 语法报错)
+          # 加入 -DLWJGL_ANDROID 屏蔽桌面端特有的源码逻辑
           FIX_FLAGS="-std=gnu89 -Wno-error -Wno-strict-prototypes -Wno-implicit-const-int-float-conversion -lm -DLWJGL_ANDROID"
 
-          # 5. 执行 Ant 编译 (全量模块列表)
-          # 注意：lwjgl.modules 中必须包含 core,egl,opengles,opengl 才能解决 openxr 的报错
-          ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,remotery,yoga,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,openal,shaderc,meshoptimizer,spvc,libdivide,meow,openxr"
+          # 4. 执行 Ant 编译 (包含所有安卓支持的模块)
+          # 注意：必须同时包含 opengl 和 opengles，才能满足 openxr 的模板依赖
+          ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,remotery,yoga,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,meshoptimizer,spvc,libdivide,meow,openxr,lwjglx"
 
           ant -Dplatform.linux=true \
             -Dlwjgl.modules=$ALL_MODULES \
@@ -78,8 +77,7 @@ jobs:
             -Dbinding.vulkan=true \
             -Dbinding.stb=true \
             -Dbinding.assimp=true \
-            -Dbinding.shaderc=true \
-            -Dbinding.openal=true \
+            -Dbinding.lwjglx=true \
             -Dbuild.type=release/3.3.3 \
             -Djavadoc.skip=true \
             -Dcompiler.linux.cc=$CC \
@@ -88,13 +86,11 @@ jobs:
             -Dcompiler.linux.linkerflags="$FIX_FLAGS" \
             compile-templates compile compile-native release
 
-          # 6. 提取所有产物
+          # 5. 提取产物
           mkdir -p bin/out
           find bin/libs/native -name 'liblwjgl*.so' -exec cp {} bin/out/ \;
-          cp $LWJGL_NATIVE/shaderc/libshaderc.so bin/out/ || true
-          cp $LWJGL_NATIVE/openal/libopenal.so bin/out/ || true
           
-          echo "编译完成，SO 文件如下："
+          echo "编译完成，生成的库文件列表："
           ls -lh bin/out/
 
       - name: Upload Artifact
