@@ -20,7 +20,7 @@ jobs:
 
       - name: Build liblwjgl_opengles.so
         run: |
-          # --- 1. 环境准备 ---
+          # --- 1. 核心环境变量 ---
           export LWJGL_BUILD_ARCH=arm64
           export ANDROID=1
           export LWJGL_BUILD_OFFLINE=1
@@ -28,7 +28,7 @@ jobs:
           export NDK_ABI=arm64-v8a
           export TARGET=aarch64-linux-android
           
-          # 定位 NDK 路径
+          # 自动定位 NDK 工具链
           NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin
           export PATH=$TOOLCHAIN:$PATH
@@ -38,12 +38,12 @@ jobs:
           LWJGL_NATIVE=bin/libs/native/linux/$LWJGL_BUILD_ARCH/org/lwjgl
           mkdir -p $LWJGL_NATIVE
 
-          # --- 2. 物理补全缺失目录 (防止 kotlinc 报错) ---
-          # 哪怕我们不编译这些模块，LWJGL 的脚本也会去扫描它们的模板路径
-          mkdir -p modules/lwjgl/lwjglx/src/templates/kotlin
-          mkdir -p modules/lwjgl/vulkan/src/templates/kotlin
-          mkdir -p modules/lwjgl/opengl/src/templates/kotlin
-          mkdir -p modules/lwjgl/glfw/src/templates/kotlin
+          # --- 2. 补全空目录 (防止 kotlinc 扫描报错) ---
+          # 创建所有可能被扫描的模块路径，确保 compile-templates 顺利通过
+          MODULES_TO_FAKE="lwjglx vulkan opengl glfw openxr assimp bgfx nfd nanovg stb par"
+          for mod in $MODULES_TO_FAKE; do
+            mkdir -p modules/lwjgl/$mod/src/templates/kotlin
+          done
 
           # --- 3. 编译 libffi (核心依赖) ---
           if [ ! -d libffi ]; then
@@ -58,18 +58,20 @@ jobs:
           cd ..
           cp libffi/$LIBFFI_A $LWJGL_NATIVE/
 
-          # --- 4. 准备编译参数 ---
-          # 适配 NDK 27 的语法补丁
+          # --- 4. 注入 Clang 兼容补丁 ---
+          # 解决 NDK 27 的语法报错并强制链接数学库
           FIX_FLAGS="-std=gnu89 -Wno-error -Wno-strict-prototypes -Wno-implicit-const-int-float-conversion -lm"
 
-          # --- 5. 执行 Ant 编译 ---
-          # -Dlwjgl.modules 是核心，限制生成器只看这三个文件夹
+          # --- 5. 执行 Ant 编译 (核心逻辑) ---
+          # -Dlwjgl.modules=core,egl,opengles 会强制 Java 编译器只看这三个文件夹
+          # 这样就不会去编译依赖 OpenGL 的 glfw 或 lwjglx
           ant -Dplatform.linux=true \
             -Dlwjgl.modules=core,egl,opengles \
             -Dbinding.core=true \
             -Dbinding.egl=true \
             -Dbinding.opengles=true \
             -Dbinding.opengl=false \
+            -Dbinding.glfw=false \
             -Dbinding.lwjglx=false \
             -Dbuild.type=release/3.3.3 \
             -Djavadoc.skip=true \
@@ -79,14 +81,15 @@ jobs:
             -Dcompiler.linux.linkerflags="$FIX_FLAGS" \
             compile-templates compile compile-native release
 
-          # --- 6. 提取最终产物 ---
+          # --- 6. 提取最终 SO 文件 ---
           mkdir -p bin/out
           find bin/libs/native -name 'liblwjgl.so' -exec cp {} bin/out/ \;
           find bin/libs/native -name 'liblwjgl_opengles.so' -exec cp {} bin/out/ \;
+          echo "编译完成，SO 文件如下："
+          ls -lh bin/out/
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: lwjgl-android-gles-arm64
           path: bin/out/
-        
