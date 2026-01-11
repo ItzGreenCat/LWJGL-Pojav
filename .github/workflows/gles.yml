@@ -1,4 +1,4 @@
-name: Build LWJGL3 Android GLES Final Solution
+name: Build LWJGL3 Android GLES (Safe Patch)
 
 on:
   workflow_dispatch:
@@ -20,17 +20,7 @@ jobs:
 
       - name: Build liblwjgl_opengles.so
         run: |
-          # --- 1. 物理清理：只保留核心三模块，删除其他所有干扰 ---
-          # 这一步是解决 "unresolved reference" 的终极手段
-          cd modules/lwjgl
-          # 移动我们要的模块到临时目录，删掉剩下的，再移回来
-          mkdir -p ../../keep
-          mv core egl opengles ../../keep/
-          rm -rf *
-          mv ../../keep/* .
-          cd ../..
-
-          # --- 2. 环境定义 ---
+          # 1. 环境定义
           export LWJGL_BUILD_ARCH=arm64
           export ANDROID=1
           export LWJGL_BUILD_OFFLINE=1
@@ -48,7 +38,14 @@ jobs:
           LWJGL_NATIVE=bin/libs/native/linux/$LWJGL_BUILD_ARCH/org/lwjgl
           mkdir -p $LWJGL_NATIVE
 
-          # --- 3. 编译 libffi ---
+          # --- 核心修复：补全所有模块的模板目录 ---
+          # 编译器要求目录必须存在。我们循环遍历 modules/lwjgl 下的所有文件夹并创建缺失的路径。
+          # 这种方法不删除任何文件，只是“修补”了构建环境。
+          for dir in modules/lwjgl/*/ ; do
+              mkdir -p "${dir}src/templates/kotlin"
+          done
+
+          # 2. 编译 libffi (核心依赖)
           if [ ! -d libffi ]; then
             wget https://github.com/libffi/libffi/releases/download/v$LIBFFI_VERSION/libffi-$LIBFFI_VERSION.tar.gz
             tar xvf libffi-$LIBFFI_VERSION.tar.gz
@@ -57,22 +54,24 @@ jobs:
           cd libffi
           bash configure --host=$TARGET --enable-static=yes --enable-shared=no CC=$CC CXX=$CXX
           make -j4
-          # 使用 find 确保能找到 libffi.a
           LIBFFI_A=$(find . -name "libffi.a" | grep ".libs" | head -n 1)
           cd ..
           cp libffi/$LIBFFI_A $LWJGL_NATIVE/
 
-          # --- 4. 准备编译参数 ---
-          # -std=gnu89 是修复 NDK 27 编译核心 C 代码的关键
+          # 3. 注入编译器补丁
           FIX_FLAGS="-std=gnu89 -Wno-error -Wno-strict-prototypes -Wno-implicit-const-int-float-conversion -lm"
 
-          # --- 5. 执行 Ant 编译 ---
-          # 因为物理删除了其他模块，这里必须显式指定只编译这三个
+          # 4. 执行 Ant 编译
+          # 明确指定我们关心的模块。虽然我们补全了目录，但通过 modules 属性
+          # 告诉生成器只真正处理 core, egl, opengles。
           ant -Dplatform.linux=true \
             -Dlwjgl.modules=core,egl,opengles \
             -Dbinding.core=true \
             -Dbinding.egl=true \
             -Dbinding.opengles=true \
+            -Dbinding.opengl=false \
+            -Dbinding.glfw=false \
+            -Dbinding.lwjglx=false \
             -Dbuild.type=release/3.3.3 \
             -Djavadoc.skip=true \
             -Dcompiler.linux.cc=$CC \
@@ -81,12 +80,10 @@ jobs:
             -Dcompiler.linux.linkerflags="$FIX_FLAGS" \
             compile-templates compile compile-native release
 
-          # --- 6. 提取最终 SO 文件 ---
+          # 5. 提取产物
           mkdir -p bin/out
           find bin/libs/native -name 'liblwjgl.so' -exec cp {} bin/out/ \;
           find bin/libs/native -name 'liblwjgl_opengles.so' -exec cp {} bin/out/ \;
-          echo "Build Complete. Files in bin/out/:"
-          ls -lh bin/out/
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
