@@ -1,4 +1,4 @@
-name: Build LWJGL3 Android Full Modules (Fixed Paths)
+name: LWJGL3 Android Full Modules Final Solution
 
 on:
   workflow_dispatch:
@@ -18,9 +18,9 @@ jobs:
           distribution: 'temurin'
           java-version: '8'
 
-      - name: Build Full Android Modules
+      - name: Build All Android Modules
         run: |
-          # 1. 基础环境变量
+          # --- 1. 核心环境变量 ---
           export LWJGL_BUILD_ARCH=arm64
           export ANDROID=1
           export LWJGL_BUILD_OFFLINE=1
@@ -28,7 +28,7 @@ jobs:
           export NDK_ABI=arm64-v8a
           export TARGET=aarch64-linux-android
           
-          # 自动定位 NDK 工具链
+          # 定位 NDK 工具链
           NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin
           export PATH=$TOOLCHAIN:$PATH
@@ -38,14 +38,14 @@ jobs:
           LWJGL_NATIVE=bin/libs/native/linux/$LWJGL_BUILD_ARCH/org/lwjgl
           mkdir -p $LWJGL_NATIVE
 
-          # --- 核心修复 1: 补全所有模块的路径，防止 kotlinc 报错 ---
-          # 哪怕文件夹是空的，只要路径存在，kotlinc 就不会报错中断
-          echo "正在补全模块路径结构..."
+          # --- 2. 目录补全 (解决 kotlinc 路径报错) ---
+          echo "正在补全所有可能的模块路径结构..."
+          # 遍历所有存在的目录并确保模板路径存在，防止编译器因路径不存在而崩溃
           for dir in modules/lwjgl/*/ ; do
               mkdir -p "${dir}src/templates/kotlin"
           done
 
-          # 2. 编译 libffi (核心依赖)
+          # --- 3. 预编译 libffi ---
           if [ ! -d libffi ]; then
             wget https://github.com/libffi/libffi/releases/download/v$LIBFFI_VERSION/libffi-$LIBFFI_VERSION.tar.gz
             tar xvf libffi-$LIBFFI_VERSION.tar.gz
@@ -59,25 +59,30 @@ jobs:
           cd ..
           cp libffi/$LIBFFI_A $LWJGL_NATIVE/
 
-          # 3. 准备编译参数 (修复 Clang 18 语法报错)
-          # 加入 -DLWJGL_ANDROID 屏蔽桌面端特有的源码逻辑
+          # --- 4. 设置全量模块列表 ---
+          # 包含所有支持 Android 的模块，确保 OpenXR 和 LWJGLX 的依赖能够被满足
+          ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,remotery,yoga,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,meshoptimizer,spvc,libdivide,meow,openxr,glfw,lwjglx"
+
+          # --- 5. 编译参数补丁 ---
+          # -std=gnu89: 修复 NDK 27 对旧 C 语法的报错
+          # -lm: 链接数学库
+          # -DLWJGL_ANDROID: 关键宏定义，让源码切换到安卓模式，避开 X11/GLX 桌面依赖
           FIX_FLAGS="-std=gnu89 -Wno-error -Wno-strict-prototypes -Wno-implicit-const-int-float-conversion -lm -DLWJGL_ANDROID"
 
-          # 4. 执行 Ant 编译 (包含所有安卓支持的模块)
-          # 注意：必须同时包含 opengl 和 opengles，才能满足 openxr 的模板依赖
-          ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,remotery,yoga,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,meshoptimizer,spvc,libdivide,meow,openxr,lwjglx"
-
+          # --- 6. 执行全量 Ant 编译 ---
+          # 必须同时设置 binding.glfw=true 和 binding.opengl=true，否则 lwjglx 编译会报错
           ant -Dplatform.linux=true \
             -Dlwjgl.modules=$ALL_MODULES \
             -Dbinding.core=true \
             -Dbinding.egl=true \
             -Dbinding.opengles=true \
             -Dbinding.opengl=true \
-            -Dbinding.openxr=true \
+            -Dbinding.glfw=true \
+            -Dbinding.lwjglx=true \
             -Dbinding.vulkan=true \
+            -Dbinding.openxr=true \
             -Dbinding.stb=true \
             -Dbinding.assimp=true \
-            -Dbinding.lwjglx=true \
             -Dbuild.type=release/3.3.3 \
             -Djavadoc.skip=true \
             -Dcompiler.linux.cc=$CC \
@@ -86,11 +91,10 @@ jobs:
             -Dcompiler.linux.linkerflags="$FIX_FLAGS" \
             compile-templates compile compile-native release
 
-          # 5. 提取产物
+          # --- 7. 提取产物 ---
           mkdir -p bin/out
           find bin/libs/native -name 'liblwjgl*.so' -exec cp {} bin/out/ \;
-          
-          echo "编译完成，生成的库文件列表："
+          echo "编译成功，产物列表："
           ls -lh bin/out/
 
       - name: Upload Artifact
