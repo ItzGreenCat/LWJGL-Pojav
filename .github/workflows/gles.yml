@@ -1,4 +1,4 @@
-name: Build LWJGL OpenGLES (Step-by-Step)
+name: Build LWJGL OpenGLES (Memory Fix)
 
 on:
   workflow_dispatch:
@@ -10,6 +10,8 @@ jobs:
     env:
       NDK_VERSION: r21e
       LWJGL_BUILD_ARCH: arm64
+      # 关键修复 1: 增加 Ant 和 Java 编译器的内存限制 (从默认的 512M 增加到 2G)
+      ANT_OPTS: "-Xmx2048m -Djava.awt.headless=true"
 
     steps:
       - name: Checkout Repository
@@ -43,28 +45,23 @@ jobs:
           #!/bin/bash
           set -e
           
-          # 1. 环境变量
+          # 环境变量设置
           export LIBFFI_VERSION=3.4.6
           export LWJGL_BUILD_OFFLINE=0
           export ANDROID_NDK_HOME=$GITHUB_WORKSPACE/android-ndk-r21e
           
-          # 设置目标架构
           if [ "$LWJGL_BUILD_ARCH" == "arm64" ]; then
             export NDK_ABI=arm64-v8a NDK_TARGET=aarch64
           fi
 
-          # 设置 NDK 工具链路径
           export TARGET=$NDK_TARGET-linux-android
           export PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
-          
-          # 准备输出目录
           LWJGL_NATIVE=bin/libs/native/linux/$LWJGL_BUILD_ARCH/org/lwjgl
           mkdir -p $LWJGL_NATIVE
 
-          # 2. 准备依赖库 (Freetype 等)
-          # 注意：即使只编译 GLES，构建脚本有时也会检查 Freetype 路径
+          # --- 1. 下载依赖库 ---
+          echo ">>> Downloading Dependencies..."
           if [ "$SKIP_FREETYPE" != "1" ]; then
-             echo "Building Freetype..."
              export BUILD_FREETYPE_VERSION=2.13.2
              wget -q https://downloads.sourceforge.net/project/freetype/freetype2/$BUILD_FREETYPE_VERSION/freetype-$BUILD_FREETYPE_VERSION.tar.gz
              tar xf freetype-$BUILD_FREETYPE_VERSION.tar.gz
@@ -79,66 +76,55 @@ jobs:
              rm -rf freetype-$BUILD_FREETYPE_VERSION
           fi
           
-          # 获取 Pojav 依赖
           wget -q -nc "https://github.com/AngelAuraMC/Amethyst-Android/raw/v3_openjdk/app_pojavlauncher/src/main/jniLibs/$NDK_ABI/libopenal.so" -P $LWJGL_NATIVE/openal
           wget -q -nc "https://github.com/AngelAuraMC/shaderc/releases/latest/download/libshaderc-$NDK_ABI.zip"
           unzip -o libshaderc-$NDK_ABI.zip -d $LWJGL_NATIVE/shaderc
 
-          # --- 3. 核心构建流程 (分步执行) ---
+          # --- 2. 定义编译参数 ---
+          # 我们把参数定义在变量里，方便重复使用
+          # 注意：删除了 -Dplatform.linux=true，让 Generator 在 Host 环境下正常运行
+          # 仅在 compile-native 阶段我们需要关心交叉编译环境
           
-          echo ">>> STEP 1: Ant Init (Download Dependencies)"
-          ant init
-
-          echo ">>> STEP 2: Compile Templates (Compile Kotlin Generator)"
-          # 这就是之前报错缺少的那一步，必须单独运行
-          ant compile-templates
-
-          echo ">>> STEP 3: Generate & Compile Native (The Real Build)"
-          # 注意：这里我们传入了 opengles=true 和 egl=true
-          # 只有在这一步才需要传入 yes | ant，因为可能有 license 提示
-          
-          yes | ant \
-            -Dplatform.linux=true \
-            -Dbinding.opengles=true \
-            -Dbinding.egl=true \
-            -Dbinding.assimp=false \
-            -Dbinding.bgfx=false \
-            -Dbinding.cuda=false \
-            -Dbinding.fmod=false \
-            -Dbinding.harfbuzz=false \
-            -Dbinding.hwloc=false \
-            -Dbinding.jawt=false \
-            -Dbinding.jemalloc=false \
-            -Dbinding.ktx=false \
-            -Dbinding.libdivide=false \
-            -Dbinding.llvm=false \
-            -Dbinding.lmdb=false \
-            -Dbinding.lz4=false \
-            -Dbinding.meow=false \
-            -Dbinding.meshoptimizer=false \
-            -Dbinding.nfd=false \
-            -Dbinding.nuklear=false \
-            -Dbinding.odbc=false \
-            -Dbinding.opencl=false \
-            -Dbinding.openvr=false \
-            -Dbinding.openxr=false \
-            -Dbinding.opus=false \
-            -Dbinding.par=false \
-            -Dbinding.remotery=false \
-            -Dbinding.rpmalloc=false \
-            -Dbinding.spvc=false \
-            -Dbinding.sse=false \
-            -Dbinding.tinyexr=false \
-            -Dbinding.tootle=false \
-            -Dbinding.xxhash=false \
-            -Dbinding.yoga=false \
-            -Dbinding.zstd=false \
+          BUILD_ARGS="-Dbinding.opengles=true -Dbinding.egl=true \
+            -Dbinding.assimp=false -Dbinding.bgfx=false -Dbinding.cuda=false \
+            -Dbinding.fmod=false -Dbinding.harfbuzz=false -Dbinding.hwloc=false \
+            -Dbinding.jawt=false -Dbinding.jemalloc=false -Dbinding.ktx=false \
+            -Dbinding.libdivide=false -Dbinding.llvm=false -Dbinding.lmdb=false \
+            -Dbinding.lz4=false -Dbinding.meow=false -Dbinding.meshoptimizer=false \
+            -Dbinding.nfd=false -Dbinding.nuklear=false -Dbinding.odbc=false \
+            -Dbinding.opencl=false -Dbinding.openvr=false -Dbinding.openxr=false \
+            -Dbinding.opus=false -Dbinding.par=false -Dbinding.remotery=false \
+            -Dbinding.rpmalloc=false -Dbinding.spvc=false -Dbinding.sse=false \
+            -Dbinding.tinyexr=false -Dbinding.tootle=false -Dbinding.xxhash=false \
+            -Dbinding.yoga=false -Dbinding.zstd=false \
             -Dbuild.type=release/3.3.3 \
             -Djavadoc.skip=true \
-            -Dnashorn.args="--no-deprecation-warning" \
-            generate compile compile-native
+            -Dnashorn.args=\"--no-deprecation-warning\""
 
-          # --- 4. 收集产物 ---
+          # --- 3. 分步执行构建 (关键修复 2) ---
+
+          echo ">>> [Phase 1] Ant Init"
+          ant init
+
+          echo ">>> [Phase 2] Compile Templates (Kotlin)"
+          # 这一步编译“代码生成器”本身
+          ant compile-templates
+
+          echo ">>> [Phase 3] Generate Source Code"
+          # 这一步使用生成器，生成 Java 和 C 代码
+          # 使用 yes | ant 防止 license 询问卡住
+          yes | ant $BUILD_ARGS generate
+
+          echo ">>> [Phase 4] Compile Java Classes"
+          # 这一步只编译 Java 代码 (.class)
+          yes | ant $BUILD_ARGS compile
+
+          echo ">>> [Phase 5] Compile Native Libraries (.so)"
+          # 这一步调用 NDK 编译 C 代码
+          # 必须显式指定 platform=linux (ant 脚本逻辑) 配合交叉编译环境
+          yes | ant $BUILD_ARGS -Dplatform.linux=true compile-native
+
+          # --- 4. 收集 ---
           echo ">>> Collection Artifacts"
           rm -rf bin/out; mkdir bin/out
           find $LWJGL_NATIVE -name 'liblwjgl*.so' -exec cp {} bin/out/ \;
