@@ -1,110 +1,66 @@
-name: LWJGL3 Android Success Build
+name: Build LWJGL for Android
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动触发构建
 
 jobs:
   build:
+    name: Compile Android Native Libs
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
+    env:
+      # 设置 NDK 版本，r21e 是编译很多图形库的黄金版本
+      NDK_VERSION: r21e 
+      ANDROID_NDK_HOME: ${{ github.workspace }}/android-ndk-r21e
+
+    steps:
+      # 1. 拉取代码
+      - name: Checkout LWJGL 3
+        uses: actions/checkout@v3
+        with:
+          repository: LWJGL/lwjgl3
+          ref: master # 或者你可以指定具体的 tag，例如 '3.3.3'
+          fetch-depth: 0
+
+      # 2. 配置 Java 环境 (Ant 需要 Java)
       - name: Set up JDK 8
         uses: actions/setup-java@v3
         with:
-          distribution: 'temurin'
           java-version: '8'
+          distribution: 'temurin'
 
-      - name: Build Android Modules
+      # 3. 安装 Ant
+      - name: Install Ant
+        run: sudo apt-get update && sudo apt-get install -y ant
+
+      # 4. 下载并配置 Android NDK
+      - name: Setup Android NDK
+        id: setup-ndk
         run: |
-          # --- 1. 环境变量 ---
-          export LWJGL_BUILD_ARCH=arm64
-          export ANDROID=1
-          export LWJGL_BUILD_OFFLINE=1
-          export LIBFFI_VERSION=3.4.6
-          export NDK_ABI=arm64-v8a
-          export TARGET=aarch64-linux-android
-          
-          # 定位 NDK
-          NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
-          TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin
-          export PATH=$TOOLCHAIN:$PATH
-          export CC=$TOOLCHAIN/${TARGET}21-clang
-          export CXX=$TOOLCHAIN/${TARGET}21-clang++
+          echo "Downloading NDK ${NDK_VERSION}..."
+          wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux-x86_64.zip
+          unzip -q android-ndk-${NDK_VERSION}-linux-x86_64.zip
+          echo "NDK path set to: $ANDROID_NDK_HOME"
 
-          LWJGL_NATIVE=bin/libs/native/linux/$LWJGL_BUILD_ARCH/org/lwjgl
-          mkdir -p $LWJGL_NATIVE
+      # 5. 初始化 LWJGL 依赖
+      # 这步会下载 Kotlin 编译器和其他构建所需的 jar 包
+      - name: Initialize Build
+        run: ant init
 
-          # --- 2. 补全目录 (防止 kotlinc 报错) ---
-          # 这一步必须保留，否则去掉模块后 kotlinc 会因为找不到文件夹而崩溃
-          echo "补全目录结构..."
-          for dir in modules/lwjgl/*/ ; do
-              mkdir -p "${dir}src/templates/kotlin"
-          done
+      # 6. 执行编译
+      # -Dplatform=android: 告诉脚本交叉编译 Android 版本
+      # release: 构建发布版本
+      # 也可以加上 -Dbinding.opengles=true 来尝试只构建 GLES 模块，但全构建更稳妥
+      - name: Build Android Native Libraries
+        run: |
+          ant release -Dplatform=android
 
-          # --- 3. 预编译 libffi ---
-          if [ ! -d libffi ]; then
-            wget https://github.com/libffi/libffi/releases/download/v$LIBFFI_VERSION/libffi-$LIBFFI_VERSION.tar.gz
-            tar xvf libffi-$LIBFFI_VERSION.tar.gz
-            mv libffi-$LIBFFI_VERSION libffi
-          fi
-          cd libffi
-          [ -f Makefile ] && make distclean || true
-          bash configure --host=$TARGET --enable-static=yes --enable-shared=no CC=$CC CXX=$CXX
-          make -j4
-          LIBFFI_A=$(find . -name "libffi.a" | grep ".libs" | head -n 1)
-          cd ..
-          cp libffi/$LIBFFI_A $LWJGL_NATIVE/
-
-          # --- 4. 模块精选 (剔除毒瘤) ---
-          # 移除了:
-          # - nfd, remotery, lwjglx (这三个在安卓上必挂)
-          # - yoga (链接顺序问题导致 fmod 报错，且对游戏开发无用，直接丢弃)
-          # 保留了:
-          # - 核心: core, egl, opengles, opengl, vulkan, glfw
-          # - 扩展: openxr, stb, assimp, jemalloc, openal 等
-          ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,meshoptimizer,spvc,libdivide,meow,openxr,glfw"
-
-          # --- 5. 编译参数 ---
-          FIX_LDFLAGS="-lm -llog -ldl"
-          FIX_CFLAGS="-std=gnu89 -Wno-error -Wno-strict-prototypes -Wno-implicit-const-int-float-conversion -DLWJGL_ANDROID"
-
-          # --- 6. 执行编译 ---
-          ant -Dplatform.linux=true \
-            -Dlwjgl.modules=$ALL_MODULES \
-            -Dbinding.core=true \
-            -Dbinding.egl=true \
-            -Dbinding.opengles=true \
-            -Dbinding.opengl=true \
-            -Dbinding.glfw=true \
-            -Dbinding.vulkan=true \
-            -Dbinding.openxr=true \
-            -Dbinding.stb=true \
-            -Dbinding.assimp=true \
-            -Dbinding.nfd=false \
-            -Dbinding.remotery=false \
-            -Dbinding.lwjglx=false \
-            -Dbinding.jawt=false \
-            -Dbinding.yoga=false \
-            -Dbuild.type=release/3.3.3 \
-            -Djavadoc.skip=true \
-            -Dcompiler.linux.cc=$CC \
-            -Dcompiler.linux.cxx=$CXX \
-            -Dcompiler.linux.cflags="$FIX_CFLAGS" \
-            -Dcompiler.linux.linkerflags="$FIX_LDFLAGS" \
-            compile-templates compile compile-native release
-
-          # --- 7. 提取产物 ---
-          mkdir -p bin/out
-          find bin/libs/native -name 'liblwjgl*.so' -exec cp {} bin/out/ \;
-          echo "编译完成！所有成功的 SO 文件："
-          ls -lh bin/out/
-
-      - name: Upload Artifact
+      # 7. 整理并上传 Artifacts (产物)
+      # 我们主要关注 arm64-v8a 和 armeabi-v7a 下的 so 文件
+      - name: Upload OpenGL ES Shared Object
         uses: actions/upload-artifact@v4
         with:
-          name: lwjgl-android-libs-arm64
-          path: bin/out/
+          name: lwjgl-android-opengles
+          path: |
+            bin/libs/native/android/**/liblwjgl_opengles.so
+            bin/libs/native/android/**/liblwjgl.so
