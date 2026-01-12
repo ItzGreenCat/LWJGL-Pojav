@@ -1,66 +1,171 @@
-name: Build LWJGL for Android
+name: Build LWJGL OpenGLES (Android arm64)
 
 on:
-  workflow_dispatch: # 允许手动触发构建
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   build:
-    name: Compile Android Native Libs
     runs-on: ubuntu-latest
-
+    
     env:
-      # 设置 NDK 版本，r21e 是编译很多图形库的黄金版本
-      NDK_VERSION: r21e 
-      ANDROID_NDK_HOME: ${{ github.workspace }}/android-ndk-r21e
+      NDK_VERSION: r21e
+      LWJGL_BUILD_ARCH: arm64
 
     steps:
-      # 1. 拉取代码
-      - name: Checkout LWJGL 3
+      # 1. 拉取 PojavLauncher 的 Fork (包含必要的 Android 补丁)
+      - name: Checkout Repository
         uses: actions/checkout@v3
         with:
-          repository: LWJGL/lwjgl3
-          ref: master # 或者你可以指定具体的 tag，例如 '3.3.3'
+          repository: PojavLauncherTeam/lwjgl3
+          ref: master
           fetch-depth: 0
 
-      # 2. 配置 Java 环境 (Ant 需要 Java)
+      # 2. 配置 Java 8
       - name: Set up JDK 8
         uses: actions/setup-java@v3
         with:
-          java-version: '8'
           distribution: 'temurin'
+          java-version: '8'
 
-      # 3. 安装 Ant
-      - name: Install Ant
-        run: sudo apt-get update && sudo apt-get install -y ant
-
-      # 4. 下载并配置 Android NDK
-      - name: Setup Android NDK
-        id: setup-ndk
+      # 3. 安装 Ant 和基础工具
+      - name: Install Build Tools
         run: |
+          sudo apt-get update
+          sudo apt-get install -y ant build-essential autoconf libtool
+
+      # 4. 配置 NDK r21e
+      - name: Setup Android NDK
+        run: |
+          cd $GITHUB_WORKSPACE
           echo "Downloading NDK ${NDK_VERSION}..."
           wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux-x86_64.zip
           unzip -q android-ndk-${NDK_VERSION}-linux-x86_64.zip
-          echo "NDK path set to: $ANDROID_NDK_HOME"
+          echo "ANDROID_NDK_HOME=$GITHUB_WORKSPACE/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
 
-      # 5. 初始化 LWJGL 依赖
-      # 这步会下载 Kotlin 编译器和其他构建所需的 jar 包
-      - name: Initialize Build
-        run: ant init
+      # 5. 写入修改后的脚本 (已启用 OpenGLES 和 EGL)
+      - name: Create Build Script
+        run: |
+          cat << 'EOF' > ci_build.bash
+          #!/bin/bash
+          set -e
+          export LIBFFI_VERSION=3.4.6
+          export ANDROID=1 LWJGL_BUILD_OFFLINE=1
+          
+          # Setup env
+          if   [ "$LWJGL_BUILD_ARCH" == "arm64" ]; then
+            export NDK_ABI=arm64-v8a NDK_TARGET=aarch64
+          fi
+
+          export TARGET=$NDK_TARGET-linux-android$NDK_SUFFIX
+          export PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+
+          LWJGL_NATIVE=bin/libs/native/linux/$LWJGL_BUILD_ARCH/org/lwjgl
+          mkdir -p $LWJGL_NATIVE
+
+          # --- 步骤: 编译/下载依赖库 (libffi, freetype 等) ---
+          if [ "$SKIP_LIBFFI" != "1" ]; then
+            if [ ! -d libffi ]; then
+              wget -q https://github.com/libffi/libffi/releases/download/v$LIBFFI_VERSION/libffi-$LIBFFI_VERSION.tar.gz
+              tar xf libffi-$LIBFFI_VERSION.tar.gz
+              mv libffi-$LIBFFI_VERSION libffi
+            fi
+            cd libffi
+            bash configure --host=$TARGET --prefix=$PWD/$NDK_TARGET-unknown-linux-android$NDK_SUFFIX CC=${TARGET}21-clang CXX=${TARGET}21-clang++
+            make -j4
+            cd ..
+            cp libffi/$NDK_TARGET-linux-android$NDK_SUFFIX/.libs/libffi.a $LWJGL_NATIVE/
+          fi
+
+          if [ "$SKIP_FREETYPE" != "1" ]; then
+            export BUILD_FREETYPE_VERSION=2.13.2
+            wget -q https://downloads.sourceforge.net/project/freetype/freetype2/$BUILD_FREETYPE_VERSION/freetype-$BUILD_FREETYPE_VERSION.tar.gz
+            tar xf freetype-$BUILD_FREETYPE_VERSION.tar.gz
+            cd freetype-$BUILD_FREETYPE_VERSION
+            export CC=$NDK_TARGET-linux-android${NDK_SUFFIX}21-clang
+            ./configure --host=$TARGET --prefix=`pwd`/build_android-$LWJGL_BUILD_ARCH --without-zlib --with-brotli=no --with-bzip2=no --with-png=no --with-harfbuzz=no --enable-static=no --enable-shared=yes 
+            make -j4
+            make install
+            llvm-strip ./build_android-$LWJGL_BUILD_ARCH/lib/libfreetype.so
+            cd ..
+            cp freetype-$BUILD_FREETYPE_VERSION/build_android-$LWJGL_BUILD_ARCH/lib/libfreetype.so $LWJGL_NATIVE/
+            rm -rf freetype-$BUILD_FREETYPE_VERSION
+          fi
+
+          # 下载 Pojav 特定的预编译库
+          POJAV_NATIVES="https://github.com/AngelAuraMC/Amethyst-Android/raw/v3_openjdk/app_pojavlauncher/src/main/jniLibs/$NDK_ABI"
+          wget -q -nc $POJAV_NATIVES/libopenal.so -P $LWJGL_NATIVE/openal
+          wget -q -nc "https://github.com/AngelAuraMC/shaderc/releases/latest/download/libshaderc-$NDK_ABI.zip"
+          unzip -o libshaderc-$NDK_ABI.zip -d $LWJGL_NATIVE/shaderc
+
+          # HACK: Skip generator (假设 Pojav 仓库已包含生成代码)
+          mkdir -p bin/classes/{generator,templates/META-INF}
+          touch bin/classes/{generator,templates}/touch.txt bin/classes/generator/generated-touch.txt
+
+          # --- 核心修改: Ant 构建命令 ---
+          echo "Starting Ant Build..."
+          ant -version
+          
+          # 这里显式开启了 opengles 和 egl，并禁用了其他不需要的模块
+          yes | ant -Dplatform.linux=true \
+            -Dbinding.opengles=true \
+            -Dbinding.egl=true \
+            -Dbinding.assimp=false \
+            -Dbinding.bgfx=false \
+            -Dbinding.cuda=false \
+            -Dbinding.fmod=false \
+            -Dbinding.harfbuzz=false \
+            -Dbinding.hwloc=false \
+            -Dbinding.jawt=false \
+            -Dbinding.jemalloc=false \
+            -Dbinding.ktx=false \
+            -Dbinding.libdivide=false \
+            -Dbinding.llvm=false \
+            -Dbinding.lmdb=false \
+            -Dbinding.lz4=false \
+            -Dbinding.meow=false \
+            -Dbinding.meshoptimizer=false \
+            -Dbinding.nfd=false \
+            -Dbinding.nuklear=false \
+            -Dbinding.odbc=false \
+            -Dbinding.opencl=false \
+            -Dbinding.openvr=false \
+            -Dbinding.openxr=false \
+            -Dbinding.opus=false \
+            -Dbinding.par=false \
+            -Dbinding.remotery=false \
+            -Dbinding.rpmalloc=false \
+            -Dbinding.spvc=false \
+            -Dbinding.sse=false \
+            -Dbinding.tinyexr=false \
+            -Dbinding.tootle=false \
+            -Dbinding.xxhash=false \
+            -Dbinding.yoga=false \
+            -Dbinding.zstd=false \
+            -Dbuild.type=release/3.3.3 \
+            -Djavadoc.skip=true \
+            -Dnashorn.args="--no-deprecation-warning" \
+            compile compile-native release
+
+          # 复制产物
+          rm -rf bin/out; mkdir bin/out
+          # 查找所有 .so 文件 (包括 lwjgl_opengles.so)
+          find $LWJGL_NATIVE -name 'liblwjgl*.so' -exec cp {} bin/out/ \;
+          cp $LWJGL_NATIVE/shaderc/libshaderc.so bin/out/
+          if [ -e "$LWJGL_NATIVE/libfreetype.so" ]; then
+            cp $LWJGL_NATIVE/libfreetype.so bin/out/
+          fi
+          EOF
 
       # 6. 执行编译
-      # -Dplatform=android: 告诉脚本交叉编译 Android 版本
-      # release: 构建发布版本
-      # 也可以加上 -Dbinding.opengles=true 来尝试只构建 GLES 模块，但全构建更稳妥
-      - name: Build Android Native Libraries
+      - name: Run Build
         run: |
-          ant release -Dplatform=android
+          chmod +x ci_build.bash
+          bash ci_build.bash
 
-      # 7. 整理并上传 Artifacts (产物)
-      # 我们主要关注 arm64-v8a 和 armeabi-v7a 下的 so 文件
-      - name: Upload OpenGL ES Shared Object
+      # 7. 上传结果
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lwjgl-android-opengles
-          path: |
-            bin/libs/native/android/**/liblwjgl_opengles.so
-            bin/libs/native/android/**/liblwjgl.so
+          name: lwjgl-opengles-arm64
+          # 使用通配符确保抓取到所有生成的 so 文件
+          path: bin/out/*.so
