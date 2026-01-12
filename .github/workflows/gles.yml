@@ -1,4 +1,4 @@
-name: Build LWJGL OpenGLES (Memory Fix)
+name: Build LWJGL OpenGLES (Disable DriftFX)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
     env:
       NDK_VERSION: r21e
       LWJGL_BUILD_ARCH: arm64
-      # 关键修复 1: 增加 Ant 和 Java 编译器的内存限制 (从默认的 512M 增加到 2G)
+      # 保持内存限制优化
       ANT_OPTS: "-Xmx2048m -Djava.awt.headless=true"
 
     steps:
@@ -45,7 +45,6 @@ jobs:
           #!/bin/bash
           set -e
           
-          # 环境变量设置
           export LIBFFI_VERSION=3.4.6
           export LWJGL_BUILD_OFFLINE=0
           export ANDROID_NDK_HOME=$GITHUB_WORKSPACE/android-ndk-r21e
@@ -60,7 +59,6 @@ jobs:
           mkdir -p $LWJGL_NATIVE
 
           # --- 1. 下载依赖库 ---
-          echo ">>> Downloading Dependencies..."
           if [ "$SKIP_FREETYPE" != "1" ]; then
              export BUILD_FREETYPE_VERSION=2.13.2
              wget -q https://downloads.sourceforge.net/project/freetype/freetype2/$BUILD_FREETYPE_VERSION/freetype-$BUILD_FREETYPE_VERSION.tar.gz
@@ -80,12 +78,11 @@ jobs:
           wget -q -nc "https://github.com/AngelAuraMC/shaderc/releases/latest/download/libshaderc-$NDK_ABI.zip"
           unzip -o libshaderc-$NDK_ABI.zip -d $LWJGL_NATIVE/shaderc
 
-          # --- 2. 定义编译参数 ---
-          # 我们把参数定义在变量里，方便重复使用
-          # 注意：删除了 -Dplatform.linux=true，让 Generator 在 Host 环境下正常运行
-          # 仅在 compile-native 阶段我们需要关心交叉编译环境
+          # --- 2. 定义编译参数 (关键修改) ---
+          # 添加了 -Dbinding.driftfx=false
           
           BUILD_ARGS="-Dbinding.opengles=true -Dbinding.egl=true \
+            -Dbinding.driftfx=false \
             -Dbinding.assimp=false -Dbinding.bgfx=false -Dbinding.cuda=false \
             -Dbinding.fmod=false -Dbinding.harfbuzz=false -Dbinding.hwloc=false \
             -Dbinding.jawt=false -Dbinding.jemalloc=false -Dbinding.ktx=false \
@@ -101,27 +98,21 @@ jobs:
             -Djavadoc.skip=true \
             -Dnashorn.args=\"--no-deprecation-warning\""
 
-          # --- 3. 分步执行构建 (关键修复 2) ---
+          # --- 3. 分步执行构建 ---
 
           echo ">>> [Phase 1] Ant Init"
           ant init
 
-          echo ">>> [Phase 2] Compile Templates (Kotlin)"
-          # 这一步编译“代码生成器”本身
+          echo ">>> [Phase 2] Compile Templates"
           ant compile-templates
 
           echo ">>> [Phase 3] Generate Source Code"
-          # 这一步使用生成器，生成 Java 和 C 代码
-          # 使用 yes | ant 防止 license 询问卡住
           yes | ant $BUILD_ARGS generate
 
           echo ">>> [Phase 4] Compile Java Classes"
-          # 这一步只编译 Java 代码 (.class)
           yes | ant $BUILD_ARGS compile
 
-          echo ">>> [Phase 5] Compile Native Libraries (.so)"
-          # 这一步调用 NDK 编译 C 代码
-          # 必须显式指定 platform=linux (ant 脚本逻辑) 配合交叉编译环境
+          echo ">>> [Phase 5] Compile Native Libraries"
           yes | ant $BUILD_ARGS -Dplatform.linux=true compile-native
 
           # --- 4. 收集 ---
