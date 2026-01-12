@@ -1,4 +1,4 @@
-name: Build LWJGL3 Android Full (Yoga Fixed)
+name: LWJGL3 Android Success Build
 
 on:
   workflow_dispatch:
@@ -39,6 +39,7 @@ jobs:
           mkdir -p $LWJGL_NATIVE
 
           # --- 2. 补全目录 (防止 kotlinc 报错) ---
+          # 这一步必须保留，否则去掉模块后 kotlinc 会因为找不到文件夹而崩溃
           echo "补全目录结构..."
           for dir in modules/lwjgl/*/ ; do
               mkdir -p "${dir}src/templates/kotlin"
@@ -58,21 +59,20 @@ jobs:
           cd ..
           cp libffi/$LIBFFI_A $LWJGL_NATIVE/
 
-          # --- 4. 模块选择 ---
-          # 移除了肯定会报错的 NFD (GTK依赖) 和 Remotery (GL依赖) 和 LWJGLX (AWT依赖)
-          # 保留 Yoga (已修复), OpenXR, Vulkan, OpenGLES 等
-          ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,yoga,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,meshoptimizer,spvc,libdivide,meow,openxr,glfw"
+          # --- 4. 模块精选 (剔除毒瘤) ---
+          # 移除了:
+          # - nfd, remotery, lwjglx (这三个在安卓上必挂)
+          # - yoga (链接顺序问题导致 fmod 报错，且对游戏开发无用，直接丢弃)
+          # 保留了:
+          # - 核心: core, egl, opengles, opengl, vulkan, glfw
+          # - 扩展: openxr, stb, assimp, jemalloc, openal 等
+          ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,meshoptimizer,spvc,libdivide,meow,openxr,glfw"
 
-          # --- 5. [关键修复] 强制链接参数 ---
-          # -lm: 解决 yoga 的 undefined symbol: fmod
-          # -llog: 解决 Android 日志符号缺失
-          # -ldl: 解决动态加载符号缺失
+          # --- 5. 编译参数 ---
           FIX_LDFLAGS="-lm -llog -ldl"
-          
-          # 编译参数: 修复 NDK 27 语法报错 + 开启安卓宏
           FIX_CFLAGS="-std=gnu89 -Wno-error -Wno-strict-prototypes -Wno-implicit-const-int-float-conversion -DLWJGL_ANDROID"
 
-          # --- 6. 执行 Ant 编译 ---
+          # --- 6. 执行编译 ---
           ant -Dplatform.linux=true \
             -Dlwjgl.modules=$ALL_MODULES \
             -Dbinding.core=true \
@@ -88,6 +88,7 @@ jobs:
             -Dbinding.remotery=false \
             -Dbinding.lwjglx=false \
             -Dbinding.jawt=false \
+            -Dbinding.yoga=false \
             -Dbuild.type=release/3.3.3 \
             -Djavadoc.skip=true \
             -Dcompiler.linux.cc=$CC \
@@ -99,11 +100,11 @@ jobs:
           # --- 7. 提取产物 ---
           mkdir -p bin/out
           find bin/libs/native -name 'liblwjgl*.so' -exec cp {} bin/out/ \;
-          echo "Done. Files:"
+          echo "编译完成！所有成功的 SO 文件："
           ls -lh bin/out/
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lwjgl-android-full-fixed
+          name: lwjgl-android-libs-arm64
           path: bin/out/
