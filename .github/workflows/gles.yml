@@ -1,4 +1,4 @@
-name: LWJGL3 Android Full (No Legacy)
+name: LWJGL3 Android Full (No Desktop Libs)
 
 on:
   workflow_dispatch:
@@ -38,8 +38,7 @@ jobs:
           LWJGL_NATIVE=bin/libs/native/linux/$LWJGL_BUILD_ARCH/org/lwjgl
           mkdir -p $LWJGL_NATIVE
 
-          # --- 2. 目录补全 (关键) ---
-          # 补全所有模块路径，防止 kotlinc 扫描时报错
+          # --- 2. 目录补全 ---
           echo "正在补全模块路径结构..."
           for dir in modules/lwjgl/*/ ; do
               mkdir -p "${dir}src/templates/kotlin"
@@ -59,19 +58,22 @@ jobs:
           cd ..
           cp libffi/$LIBFFI_A $LWJGL_NATIVE/
 
-          # --- 4. 剔除不兼容模块 ---
-          # 移除了 'lwjglx' (依赖桌面 AWT/GLFW Hacks)
-          # 保留了 'glfw', 'openxr', 'vulkan', 'opengles' 等所有现代模块
-          ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,remotery,yoga,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,meshoptimizer,spvc,libdivide,meow,openxr,glfw"
+          # --- 4. 剔除桌面专用模块 ---
+          # 移除了:
+          # - nfd (需要 GTK/DBus)
+          # - remotery (需要 libGL.so)
+          # - lwjglx (需要 AWT)
+          # 保留了: yoga, stb, assimp, glfw, openxr, vulkan 等
+          ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,yoga,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,meshoptimizer,spvc,libdivide,meow,openxr,glfw"
 
           # --- 5. 编译参数补丁 ---
-          # -std=gnu89: 修复 NDK 27 报错
-          # -lm: 链接数学库
-          # -DLWJGL_ANDROID: 屏蔽桌面端代码
-          FIX_FLAGS="-std=gnu89 -Wno-error -Wno-strict-prototypes -Wno-implicit-const-int-float-conversion -lm -DLWJGL_ANDROID"
+          # -lm: 链接数学库 (解决 yoga 报错)
+          # -llog: Android 日志库
+          # -ldl: 动态链接加载器
+          FIX_CFLAGS="-std=gnu89 -Wno-error -Wno-strict-prototypes -Wno-implicit-const-int-float-conversion -DLWJGL_ANDROID"
+          FIX_LDFLAGS="-lm -llog -ldl"
 
           # --- 6. 执行全量 Ant 编译 ---
-          # 显式禁用 lwjglx 和 jawt
           ant -Dplatform.linux=true \
             -Dlwjgl.modules=$ALL_MODULES \
             -Dbinding.core=true \
@@ -83,19 +85,20 @@ jobs:
             -Dbinding.openxr=true \
             -Dbinding.stb=true \
             -Dbinding.assimp=true \
+            -Dbinding.nfd=false \
+            -Dbinding.remotery=false \
             -Dbinding.lwjglx=false \
             -Dbinding.jawt=false \
             -Dbuild.type=release/3.3.3 \
             -Djavadoc.skip=true \
             -Dcompiler.linux.cc=$CC \
             -Dcompiler.linux.cxx=$CXX \
-            -Dcompiler.linux.cflags="$FIX_FLAGS" \
-            -Dcompiler.linux.linkerflags="$FIX_FLAGS" \
+            -Dcompiler.linux.cflags="$FIX_CFLAGS" \
+            -Dcompiler.linux.linkerflags="$FIX_LDFLAGS" \
             compile-templates compile compile-native release
 
           # --- 7. 提取产物 ---
           mkdir -p bin/out
-          # 提取所有生成的 SO 文件
           find bin/libs/native -name 'liblwjgl*.so' -exec cp {} bin/out/ \;
           echo "编译成功，产物列表："
           ls -lh bin/out/
