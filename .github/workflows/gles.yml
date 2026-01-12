@@ -1,4 +1,4 @@
-name: Build LWJGL OpenGLES (Final)
+name: Build LWJGL OpenGLES (Step-by-Step)
 
 on:
   workflow_dispatch:
@@ -43,63 +43,59 @@ jobs:
           #!/bin/bash
           set -e
           
-          # --- 环境变量设置 ---
+          # 1. 环境变量
           export LIBFFI_VERSION=3.4.6
-          export ANDROID=1 
-          export LWJGL_BUILD_OFFLINE=0 # 必须允许联网下载 Kotlin 依赖
+          export LWJGL_BUILD_OFFLINE=0
+          export ANDROID_NDK_HOME=$GITHUB_WORKSPACE/android-ndk-r21e
           
+          # 设置目标架构
           if [ "$LWJGL_BUILD_ARCH" == "arm64" ]; then
             export NDK_ABI=arm64-v8a NDK_TARGET=aarch64
           fi
 
-          export TARGET=$NDK_TARGET-linux-android$NDK_SUFFIX
+          # 设置 NDK 工具链路径
+          export TARGET=$NDK_TARGET-linux-android
           export PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          
+          # 准备输出目录
           LWJGL_NATIVE=bin/libs/native/linux/$LWJGL_BUILD_ARCH/org/lwjgl
           mkdir -p $LWJGL_NATIVE
 
-          # --- 1. 准备依赖 (libffi/freetype) ---
-          # 即使只用 opengles，native 编译有时也会检查这些库的路径
-          
-          if [ ! -d libffi ]; then
-            wget -q https://github.com/libffi/libffi/releases/download/v$LIBFFI_VERSION/libffi-$LIBFFI_VERSION.tar.gz
-            tar xf libffi-$LIBFFI_VERSION.tar.gz
-            mv libffi-$LIBFFI_VERSION libffi
+          # 2. 准备依赖库 (Freetype 等)
+          # 注意：即使只编译 GLES，构建脚本有时也会检查 Freetype 路径
+          if [ "$SKIP_FREETYPE" != "1" ]; then
+             echo "Building Freetype..."
+             export BUILD_FREETYPE_VERSION=2.13.2
+             wget -q https://downloads.sourceforge.net/project/freetype/freetype2/$BUILD_FREETYPE_VERSION/freetype-$BUILD_FREETYPE_VERSION.tar.gz
+             tar xf freetype-$BUILD_FREETYPE_VERSION.tar.gz
+             cd freetype-$BUILD_FREETYPE_VERSION
+             export CC=$NDK_TARGET-linux-android21-clang
+             ./configure --host=$TARGET --prefix=`pwd`/build_android-$LWJGL_BUILD_ARCH --without-zlib --with-brotli=no --with-bzip2=no --with-png=no --with-harfbuzz=no --enable-static=no --enable-shared=yes 
+             make -j4
+             make install
+             llvm-strip ./build_android-$LWJGL_BUILD_ARCH/lib/libfreetype.so
+             cd ..
+             cp freetype-$BUILD_FREETYPE_VERSION/build_android-$LWJGL_BUILD_ARCH/lib/libfreetype.so $LWJGL_NATIVE/
+             rm -rf freetype-$BUILD_FREETYPE_VERSION
           fi
-          cd libffi
-          bash configure --host=$TARGET --prefix=$PWD/$NDK_TARGET-unknown-linux-android$NDK_SUFFIX CC=${TARGET}21-clang CXX=${TARGET}21-clang++
-          make -j4
-          cd ..
-          cp libffi/$NDK_TARGET-linux-android$NDK_SUFFIX/.libs/libffi.a $LWJGL_NATIVE/
-
-          export BUILD_FREETYPE_VERSION=2.13.2
-          wget -q https://downloads.sourceforge.net/project/freetype/freetype2/$BUILD_FREETYPE_VERSION/freetype-$BUILD_FREETYPE_VERSION.tar.gz
-          tar xf freetype-$BUILD_FREETYPE_VERSION.tar.gz
-          cd freetype-$BUILD_FREETYPE_VERSION
-          export CC=$NDK_TARGET-linux-android${NDK_SUFFIX}21-clang
-          ./configure --host=$TARGET --prefix=`pwd`/build_android-$LWJGL_BUILD_ARCH --without-zlib --with-brotli=no --with-bzip2=no --with-png=no --with-harfbuzz=no --enable-static=no --enable-shared=yes 
-          make -j4
-          make install
-          llvm-strip ./build_android-$LWJGL_BUILD_ARCH/lib/libfreetype.so
-          cd ..
-          cp freetype-$BUILD_FREETYPE_VERSION/build_android-$LWJGL_BUILD_ARCH/lib/libfreetype.so $LWJGL_NATIVE/
-          rm -rf freetype-$BUILD_FREETYPE_VERSION
-
-          # Pojav 预编译库
-          POJAV_NATIVES="https://github.com/AngelAuraMC/Amethyst-Android/raw/v3_openjdk/app_pojavlauncher/src/main/jniLibs/$NDK_ABI"
-          wget -q -nc $POJAV_NATIVES/libopenal.so -P $LWJGL_NATIVE/openal
+          
+          # 获取 Pojav 依赖
+          wget -q -nc "https://github.com/AngelAuraMC/Amethyst-Android/raw/v3_openjdk/app_pojavlauncher/src/main/jniLibs/$NDK_ABI/libopenal.so" -P $LWJGL_NATIVE/openal
           wget -q -nc "https://github.com/AngelAuraMC/shaderc/releases/latest/download/libshaderc-$NDK_ABI.zip"
           unzip -o libshaderc-$NDK_ABI.zip -d $LWJGL_NATIVE/shaderc
 
-          # --- 2. 构建 LWJGL (修复版) ---
+          # --- 3. 核心构建流程 (分步执行) ---
           
-          echo ">>> Initializing Build..."
+          echo ">>> STEP 1: Ant Init (Download Dependencies)"
           ant init
-          
-          echo ">>> Running Build Sequence (Generate -> Compile -> Native)..."
-          
-          # 关键修改：
-          # 1. 添加 'generate' 目标，放在 compile 之前
-          # 2. 保留 opengles=true 和 egl=true
+
+          echo ">>> STEP 2: Compile Templates (Compile Kotlin Generator)"
+          # 这就是之前报错缺少的那一步，必须单独运行
+          ant compile-templates
+
+          echo ">>> STEP 3: Generate & Compile Native (The Real Build)"
+          # 注意：这里我们传入了 opengles=true 和 egl=true
+          # 只有在这一步才需要传入 yes | ant，因为可能有 license 提示
           
           yes | ant \
             -Dplatform.linux=true \
@@ -140,11 +136,13 @@ jobs:
             -Dbuild.type=release/3.3.3 \
             -Djavadoc.skip=true \
             -Dnashorn.args="--no-deprecation-warning" \
-            generate compile compile-native release
+            generate compile compile-native
 
-          # --- 3. 收集产物 ---
+          # --- 4. 收集产物 ---
+          echo ">>> Collection Artifacts"
           rm -rf bin/out; mkdir bin/out
           find $LWJGL_NATIVE -name 'liblwjgl*.so' -exec cp {} bin/out/ \;
+          ls -R bin/out
           EOF
 
       - name: Run Build
