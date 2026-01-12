@@ -1,4 +1,4 @@
-name: LWJGL3 Android Full Modules Final Solution
+name: LWJGL3 Android Full (No Legacy)
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ jobs:
           distribution: 'temurin'
           java-version: '8'
 
-      - name: Build All Android Modules
+      - name: Build Android Modules
         run: |
           # --- 1. 核心环境变量 ---
           export LWJGL_BUILD_ARCH=arm64
@@ -38,9 +38,9 @@ jobs:
           LWJGL_NATIVE=bin/libs/native/linux/$LWJGL_BUILD_ARCH/org/lwjgl
           mkdir -p $LWJGL_NATIVE
 
-          # --- 2. 目录补全 (解决 kotlinc 路径报错) ---
-          echo "正在补全所有可能的模块路径结构..."
-          # 遍历所有存在的目录并确保模板路径存在，防止编译器因路径不存在而崩溃
+          # --- 2. 目录补全 (关键) ---
+          # 补全所有模块路径，防止 kotlinc 扫描时报错
+          echo "正在补全模块路径结构..."
           for dir in modules/lwjgl/*/ ; do
               mkdir -p "${dir}src/templates/kotlin"
           done
@@ -59,18 +59,19 @@ jobs:
           cd ..
           cp libffi/$LIBFFI_A $LWJGL_NATIVE/
 
-          # --- 4. 设置全量模块列表 ---
-          # 包含所有支持 Android 的模块，确保 OpenXR 和 LWJGLX 的依赖能够被满足
-          ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,remotery,yoga,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,meshoptimizer,spvc,libdivide,meow,openxr,glfw,lwjglx"
+          # --- 4. 剔除不兼容模块 ---
+          # 移除了 'lwjglx' (依赖桌面 AWT/GLFW Hacks)
+          # 保留了 'glfw', 'openxr', 'vulkan', 'opengles' 等所有现代模块
+          ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,remotery,yoga,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,meshoptimizer,spvc,libdivide,meow,openxr,glfw"
 
           # --- 5. 编译参数补丁 ---
-          # -std=gnu89: 修复 NDK 27 对旧 C 语法的报错
+          # -std=gnu89: 修复 NDK 27 报错
           # -lm: 链接数学库
-          # -DLWJGL_ANDROID: 关键宏定义，让源码切换到安卓模式，避开 X11/GLX 桌面依赖
+          # -DLWJGL_ANDROID: 屏蔽桌面端代码
           FIX_FLAGS="-std=gnu89 -Wno-error -Wno-strict-prototypes -Wno-implicit-const-int-float-conversion -lm -DLWJGL_ANDROID"
 
           # --- 6. 执行全量 Ant 编译 ---
-          # 必须同时设置 binding.glfw=true 和 binding.opengl=true，否则 lwjglx 编译会报错
+          # 显式禁用 lwjglx 和 jawt
           ant -Dplatform.linux=true \
             -Dlwjgl.modules=$ALL_MODULES \
             -Dbinding.core=true \
@@ -78,11 +79,12 @@ jobs:
             -Dbinding.opengles=true \
             -Dbinding.opengl=true \
             -Dbinding.glfw=true \
-            -Dbinding.lwjglx=true \
             -Dbinding.vulkan=true \
             -Dbinding.openxr=true \
             -Dbinding.stb=true \
             -Dbinding.assimp=true \
+            -Dbinding.lwjglx=false \
+            -Dbinding.jawt=false \
             -Dbuild.type=release/3.3.3 \
             -Djavadoc.skip=true \
             -Dcompiler.linux.cc=$CC \
@@ -93,6 +95,7 @@ jobs:
 
           # --- 7. 提取产物 ---
           mkdir -p bin/out
+          # 提取所有生成的 SO 文件
           find bin/libs/native -name 'liblwjgl*.so' -exec cp {} bin/out/ \;
           echo "编译成功，产物列表："
           ls -lh bin/out/
