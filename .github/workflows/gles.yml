@@ -1,4 +1,4 @@
-name: LWJGL3 Android Full (No Desktop Libs)
+name: Build LWJGL3 Android Full (Yoga Fixed)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
 
       - name: Build Android Modules
         run: |
-          # --- 1. 核心环境变量 ---
+          # --- 1. 环境变量 ---
           export LWJGL_BUILD_ARCH=arm64
           export ANDROID=1
           export LWJGL_BUILD_OFFLINE=1
@@ -28,7 +28,7 @@ jobs:
           export NDK_ABI=arm64-v8a
           export TARGET=aarch64-linux-android
           
-          # 定位 NDK 工具链
+          # 定位 NDK
           NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin
           export PATH=$TOOLCHAIN:$PATH
@@ -38,8 +38,8 @@ jobs:
           LWJGL_NATIVE=bin/libs/native/linux/$LWJGL_BUILD_ARCH/org/lwjgl
           mkdir -p $LWJGL_NATIVE
 
-          # --- 2. 目录补全 ---
-          echo "正在补全模块路径结构..."
+          # --- 2. 补全目录 (防止 kotlinc 报错) ---
+          echo "补全目录结构..."
           for dir in modules/lwjgl/*/ ; do
               mkdir -p "${dir}src/templates/kotlin"
           done
@@ -58,22 +58,21 @@ jobs:
           cd ..
           cp libffi/$LIBFFI_A $LWJGL_NATIVE/
 
-          # --- 4. 剔除桌面专用模块 ---
-          # 移除了:
-          # - nfd (需要 GTK/DBus)
-          # - remotery (需要 libGL.so)
-          # - lwjglx (需要 AWT)
-          # 保留了: yoga, stb, assimp, glfw, openxr, vulkan 等
+          # --- 4. 模块选择 ---
+          # 移除了肯定会报错的 NFD (GTK依赖) 和 Remotery (GL依赖) 和 LWJGLX (AWT依赖)
+          # 保留 Yoga (已修复), OpenXR, Vulkan, OpenGLES 等
           ALL_MODULES="core,egl,opengles,opengl,stb,rpmalloc,yoga,nanovg,nuklear,tinyfd,assimp,jemalloc,lmdb,lz4,xxhash,zstd,vulkan,vma,meshoptimizer,spvc,libdivide,meow,openxr,glfw"
 
-          # --- 5. 编译参数补丁 ---
-          # -lm: 链接数学库 (解决 yoga 报错)
-          # -llog: Android 日志库
-          # -ldl: 动态链接加载器
-          FIX_CFLAGS="-std=gnu89 -Wno-error -Wno-strict-prototypes -Wno-implicit-const-int-float-conversion -DLWJGL_ANDROID"
+          # --- 5. [关键修复] 强制链接参数 ---
+          # -lm: 解决 yoga 的 undefined symbol: fmod
+          # -llog: 解决 Android 日志符号缺失
+          # -ldl: 解决动态加载符号缺失
           FIX_LDFLAGS="-lm -llog -ldl"
+          
+          # 编译参数: 修复 NDK 27 语法报错 + 开启安卓宏
+          FIX_CFLAGS="-std=gnu89 -Wno-error -Wno-strict-prototypes -Wno-implicit-const-int-float-conversion -DLWJGL_ANDROID"
 
-          # --- 6. 执行全量 Ant 编译 ---
+          # --- 6. 执行 Ant 编译 ---
           ant -Dplatform.linux=true \
             -Dlwjgl.modules=$ALL_MODULES \
             -Dbinding.core=true \
@@ -100,11 +99,11 @@ jobs:
           # --- 7. 提取产物 ---
           mkdir -p bin/out
           find bin/libs/native -name 'liblwjgl*.so' -exec cp {} bin/out/ \;
-          echo "编译成功，产物列表："
+          echo "Done. Files:"
           ls -lh bin/out/
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lwjgl-android-full-arm64
+          name: lwjgl-android-full-fixed
           path: bin/out/
